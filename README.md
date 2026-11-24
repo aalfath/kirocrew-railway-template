@@ -27,8 +27,9 @@ It runs the official image `ghcr.io/kirodotdev/kirocrew:0.13.1`, pinned by diges
 |---|---|---|
 | `KIROCREW_LOGIN_PASSWORD` | `${{secret(32)}}` | Password for `/login` (user `admin`). Generated; read it in the service's Variables tab. |
 | `KIROCREW_LOGIN_USER` | `admin` | Basic-auth user name for `/login`. |
-| `KIROCREW_LOGIN_TTL` | `15m` | How long a minted dashboard link stays valid. |
-| `KIRO_API_KEY` | empty, optional | Kiro API key (Kiro Pro and higher). Leave empty and sign in with `kiro-login` instead (Free plan works). |
+| `PORT` | `8080` | Port Caddy listens on; leave as is. |
+| `KIROCREW_LOGIN_TTL` | `15m` (not set) | How long a minted dashboard link stays valid. |
+| `KIRO_API_KEY` | not set | Optional: add it yourself to use a Kiro API key (Kiro Pro and higher) instead of signing in with `kiro-login` (Free plan works). |
 | `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_BOT_TOKEN`, `KIROCREW_OWNER_ID` | not set | Optional chat channels: add them as service variables and redeploy. The upstream entrypoint moves them into `~/.kiro/crew/.env` (mode 600). |
 
 ## After deploying
@@ -46,7 +47,8 @@ It runs the official image `ghcr.io/kirodotdev/kirocrew:0.13.1`, pinned by diges
 ## Resources
 
 KiroCrew's gateway idles at about 350–420 MB and is OOM-killed under 0.5 GB, so it needs **Railway Hobby or
-higher, with about 1 GB of RAM** (more for many parallel agent sessions; each Kiro agent session adds a few hundred MB).
+higher, with about 1 GB of RAM** (measured on Railway: about 385 MB anonymous memory at idle, killed for lack of memory
+about 30 s after boot at 0.5 GB; the start script logs a warning below about 900 MB) (more for many parallel agent sessions; each Kiro agent session adds a few hundred MB).
 The inner agent sandbox needs Linux user namespaces, which Railway doesn't offer, so agent commands run
 unsandboxed inside the container (KiroCrew's documented `KIROCREW_ALLOW_UNSANDBOXED=1` mode).
 
