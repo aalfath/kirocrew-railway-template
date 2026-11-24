@@ -70,6 +70,8 @@ export GOMAXPROCS="$CPUS" UV_THREADPOOL_SIZE=4
 # Railway has no user namespaces, so the inner agent sandbox can't start; the
 # container is the isolation boundary (seeded on first run by the entrypoint).
 export KIROCREW_ALLOW_UNSANDBOXED=1
+# Absolute path, so the gateway trusts the bundled kiro-cli (PATH lookups are not trusted).
+export KIROCREW_KIRO_BIN="${KIROCREW_KIRO_BIN:-/usr/local/bin/kiro-cli}"
 
 # Memory thresholds sized to this container (upstream defaults assume >= 4 GB).
 CFG_DIR="$APP_HOME/.kiro/crew"
