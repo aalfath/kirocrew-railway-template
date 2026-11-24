@@ -1,0 +1,10 @@
+#!/bin/sh
+# Sign the container's kiro-cli in to your Kiro account (Free plan works).
+# Prints a device code and URL; open it in your browser and approve.
+# Extra arguments go to `kiro-cli login` (e.g. --license pro).
+set -e
+if [ $# -eq 0 ]; then set -- --license free; fi
+if [ "$(id -u)" = "0" ]; then
+  exec runuser -u kirocrew -- env HOME=/home/kirocrew kiro-cli login --use-device-flow "$@"
+fi
+exec kiro-cli login --use-device-flow "$@"

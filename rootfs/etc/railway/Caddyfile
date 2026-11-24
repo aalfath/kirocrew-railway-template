@@ -1,0 +1,35 @@
+{
+	admin off
+	auto_https off
+	persist_config off
+	log {
+		output stderr
+		level ERROR
+	}
+}
+
+:{$PORT} {
+	# Health check for Railway (token-free in the gateway).
+	handle /api/health {
+		reverse_proxy 127.0.0.1:{$KIROCREW_INTERNAL_PORT} {
+			header_up Host 127.0.0.1:{$KIROCREW_INTERNAL_PORT}
+		}
+	}
+
+	# Sign-in link minter: generated password, then a short-lived dashboard link.
+	handle /login {
+		basic_auth {
+			{$KIROCREW_LOGIN_USER} {$KIROCREW_LOGIN_HASH}
+		}
+		reverse_proxy 127.0.0.1:{$KIROCREW_LOGIN_PORT}
+	}
+
+	# Everything else: the KiroCrew dashboard (its own token auth applies).
+	handle {
+		reverse_proxy 127.0.0.1:{$KIROCREW_INTERNAL_PORT} {
+			header_up X-Forwarded-Proto https
+			flush_interval -1
+			stream_timeout 24h
+		}
+	}
+}

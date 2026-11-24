@@ -1,0 +1,8 @@
+#!/bin/sh
+# Run a kirocrew command as the app user against the running gateway,
+# e.g. `crew token --ttl 2h`, `crew config set ...`, `crew doctor`.
+set -e
+if [ "$(id -u)" = "0" ]; then
+  exec runuser -u kirocrew -- env -u PORT HOME=/home/kirocrew KIROCREW_PORT=5476 kirocrew "$@"
+fi
+exec env -u PORT KIROCREW_PORT=5476 kirocrew "$@"

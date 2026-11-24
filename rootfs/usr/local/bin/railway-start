@@ -1,0 +1,163 @@
+#!/bin/bash
+# Railway start script for KiroCrew (aalfath/kirocrew-railway-template).
+# Runs three processes in one container and exits non-zero if any of them stops,
+# so Railway's ON_FAILURE restart policy brings the service back:
+#   1. the KiroCrew gateway (upstream entrypoint), on 127.0.0.1 only
+#   2. Caddy on $PORT: health check, password-protected /login, the dashboard
+#   3. a loopback helper that mints dashboard sign-in links for /login
+set -euo pipefail
+
+log() { echo "[railway-start] $*"; }
+die() { echo "[railway-start] ERROR: $*" >&2; exit 1; }
+
+APP_USER=kirocrew
+APP_HOME=/home/kirocrew
+
+# --- Required generated password -------------------------------------------
+PW="${KIROCREW_LOGIN_PASSWORD:-}"
+if [ "${#PW}" -lt 24 ]; then
+  die "KIROCREW_LOGIN_PASSWORD is empty or shorter than 24 characters; refusing to start with an unprotected /login."
+fi
+export KIROCREW_LOGIN_USER="${KIROCREW_LOGIN_USER:-admin}"
+[ -n "$KIROCREW_LOGIN_USER" ] || die "KIROCREW_LOGIN_USER is empty."
+KIROCREW_LOGIN_HASH="$(printf '%s' "$PW" | caddy hash-password 2>/dev/null)" || die "could not hash the login password."
+export KIROCREW_LOGIN_HASH
+unset KIROCREW_LOGIN_PASSWORD PW
+
+# --- Ports ---------------------------------------------------------------------
+export PORT="${PORT:-8080}"
+export KIROCREW_INTERNAL_PORT=5476
+export KIROCREW_LOGIN_PORT=5477
+export KIROCREW_LOGIN_TTL="${KIROCREW_LOGIN_TTL:-15m}"
+case "$PORT" in "$KIROCREW_INTERNAL_PORT"|"$KIROCREW_LOGIN_PORT") die "PORT must not be $PORT (used internally).";; esac
+
+# --- Public origin (ignore an empty or unresolved Railway domain) ------------
+DOMAIN="${KIROCREW_PUBLIC_DOMAIN:-${RAILWAY_PUBLIC_DOMAIN:-}}"
+DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN%%/*}"
+if [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+  export KIROCREW_CORS_ORIGINS="https://$DOMAIN"
+  log "public origin: https://$DOMAIN"
+else
+  log "no public domain yet; the dashboard answers only once a Railway domain is attached and the service redeployed."
+fi
+
+# --- Volume ownership ----------------------------------------------------------
+mkdir -p "$APP_HOME"
+if [ "$(stat -c %u "$APP_HOME")" != "1000" ] || [ -n "$(find "$APP_HOME" -maxdepth 2 ! -user 1000 -print -quit 2>/dev/null)" ]; then
+  log "fixing ownership of $APP_HOME"
+  chown -R 1000:1000 "$APP_HOME"
+fi
+rmdir "$APP_HOME/lost+found" 2>/dev/null || true
+[ -f "$APP_HOME/.bashrc" ] || cp -n /etc/skel/.bashrc /etc/skel/.profile "$APP_HOME"/ 2>/dev/null || true
+chown 1000:1000 "$APP_HOME"/.bashrc "$APP_HOME"/.profile 2>/dev/null || true
+
+# --- Small-container tuning ----------------------------------------------------
+# CPU count from the cgroup quota (Railway shows the host's 32+ CPUs otherwise).
+CPUS=1
+if [ -r /sys/fs/cgroup/cpu.max ]; then
+  read -r q p < /sys/fs/cgroup/cpu.max || true
+  if [ "${q:-max}" != "max" ] && [ "${p:-0}" -gt 0 ]; then CPUS=$(( (q + p - 1) / p )); else CPUS=$(nproc); fi
+fi
+[ "$CPUS" -ge 1 ] || CPUS=1
+[ "$CPUS" -le 8 ] || CPUS=8
+export CI=1                                    # no browser-harness auto-download on first boot
+export KIROCREW_SKIP_MODEL_DOWNLOAD="${KIROCREW_SKIP_MODEL_DOWNLOAD:-1}"   # keyword-only memory search, no local embedding model
+export KIROCREW_SKIP_APP_STORE_FETCH="${KIROCREW_SKIP_APP_STORE_FETCH:-1}"
+export KIROCREW_PATH_RESOLVE_WORKERS="${KIROCREW_PATH_RESOLVE_WORKERS:-2}"
+export KIROCREW_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1
+export MALLOC_ARENA_MAX=2 OMP_NUM_THREADS="$CPUS" OPENBLAS_NUM_THREADS="$CPUS" MKL_NUM_THREADS="$CPUS" TOKENIZERS_PARALLELISM=false
+export GOMAXPROCS="$CPUS" UV_THREADPOOL_SIZE=4
+# Railway has no user namespaces, so the inner agent sandbox can't start; the
+# container is the isolation boundary (seeded on first run by the entrypoint).
+export KIROCREW_ALLOW_UNSANDBOXED=1
+
+# Memory thresholds sized to this container (upstream defaults assume >= 4 GB).
+CFG_DIR="$APP_HOME/.kiro/crew"
+runuser -u "$APP_USER" -- mkdir -p "$CFG_DIR"
+runuser -u "$APP_USER" -- python3 - "$CFG_DIR/config.json" <<'PY' || die "could not prepare config.json"
+import json, os, sys
+path = sys.argv[1]
+first = not os.path.exists(path)
+cfg = {}
+if not first:
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except Exception:
+        sys.exit("config.json is not valid JSON; fix it with `crew config` before restarting")
+lim = 0
+try:
+    raw = open("/sys/fs/cgroup/memory.max").read().strip()
+    lim = 0 if raw == "max" else int(raw)
+except Exception:
+    pass
+agent = cfg.setdefault("agent", {})
+marker = "railway_memory_seeded"
+if lim and lim < 8 * 1024**3 and not agent.get(marker):
+    gb = lim / 1024**3
+    agent.setdefault("resource_pressure_gb", round(max(0.15, gb * 0.25), 2))
+    agent.setdefault("resource_critical_gb", round(max(0.1, gb * 0.1), 2))
+    agent.setdefault("spawn_min_memory_gb", round(max(0.1, gb * 0.1), 2))
+    agent[marker] = True
+if first:
+    # Same posture decision the upstream entrypoint makes on a first run: keep
+    # the inner sandbox when the runtime allows it, else allow unsandboxed exec
+    # (Railway has no user namespaces; the container is the isolation boundary).
+    agent.setdefault("sandbox", "auto")
+    try:
+        from kiro_crew.sandbox import detect_backend
+        has_backend = detect_backend() != "none"
+    except Exception:
+        has_backend = False
+    if not has_backend:
+        agent.setdefault("sandbox_allow_unsandboxed_exec", True)
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(cfg, f, indent=2)
+os.replace(tmp, path)
+os.chmod(path, 0o600)
+PY
+
+# --- Start the three processes as the non-root user --------------------------
+GW_ENV=(env -u PORT KIROCREW_PORT="$KIROCREW_INTERNAL_PORT" KIROCREW_BIND=127.0.0.1 HOME="$APP_HOME" USER="$APP_USER")
+cd "$APP_HOME"
+
+pids=()
+runuser -u "$APP_USER" -- "${GW_ENV[@]}" kirocrew-entrypoint gateway &
+GW_PID=$!; pids+=("$GW_PID")
+
+# Wait for the gateway's health endpoint before opening the public port.
+for i in $(seq 1 180); do
+  if curl -fsS -o /dev/null "http://127.0.0.1:$KIROCREW_INTERNAL_PORT/api/health" 2>/dev/null; then break; fi
+  if ! kill -0 "$GW_PID" 2>/dev/null; then rc=0; wait "$GW_PID" || rc=$?; die "gateway exited during start-up (code $rc)."; fi
+  sleep 1
+done
+curl -fsS -o /dev/null "http://127.0.0.1:$KIROCREW_INTERNAL_PORT/api/health" || die "gateway did not answer /api/health within 180 s."
+log "gateway is up on 127.0.0.1:$KIROCREW_INTERNAL_PORT"
+
+runuser -u "$APP_USER" -- env -u PORT HOME="$APP_HOME" KIROCREW_PORT="$KIROCREW_INTERNAL_PORT" \
+  KIROCREW_LOGIN_PORT="$KIROCREW_LOGIN_PORT" KIROCREW_INTERNAL_PORT="$KIROCREW_INTERNAL_PORT" KIROCREW_LOGIN_TTL="$KIROCREW_LOGIN_TTL" \
+  python3 /usr/local/lib/railway/login_helper.py &
+pids+=("$!")
+
+runuser -u "$APP_USER" -- env HOME=/tmp XDG_DATA_HOME=/tmp/caddy-data XDG_CONFIG_HOME=/tmp/caddy-config \
+  caddy run --config /etc/railway/Caddyfile --adapter caddyfile &
+pids+=("$!")
+log "listening on :$PORT (dashboard, /login, /api/health)"
+
+term() { log "stopping"; kill -TERM "${pids[@]}" 2>/dev/null || true; wait || true; exit 0; }
+trap term TERM INT
+
+# Poll (not wait -n) so the first child that stops ends the container non-zero.
+while :; do
+  for pid in "${pids[@]}"; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rc=0; wait "$pid" 2>/dev/null || rc=$?
+      [ "$rc" -ne 0 ] || rc=1
+      echo "[railway-start] process $pid stopped (code $rc); exiting so Railway restarts the service." >&2
+      kill -TERM "${pids[@]}" 2>/dev/null || true
+      exit "$rc"
+    fi
+  done
+  sleep 2
+done
