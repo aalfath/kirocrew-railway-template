@@ -51,6 +51,13 @@ rmdir "$APP_HOME/lost+found" 2>/dev/null || true
 [ -f "$APP_HOME/.bashrc" ] || cp -n /etc/skel/.bashrc /etc/skel/.profile "$APP_HOME"/ 2>/dev/null || true
 chown 1000:1000 "$APP_HOME"/.bashrc "$APP_HOME"/.profile 2>/dev/null || true
 
+# --- Memory check -------------------------------------------------------------------
+MEM_MAX=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo max)
+if [ "$MEM_MAX" != "max" ] && [ "$MEM_MAX" -lt 900000000 ] 2>/dev/null; then
+  echo "[railway-start] WARNING: this service has $((MEM_MAX / 1048576)) MB of RAM. KiroCrew needs about 1 GB" \
+       "(Railway Hobby or higher) and will be stopped for lack of memory below that." >&2
+fi
+
 # --- Small-container tuning ----------------------------------------------------
 # CPU count from the cgroup quota (Railway shows the host's 32+ CPUs otherwise).
 CPUS=1
